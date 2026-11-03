@@ -1,138 +1,233 @@
+
 import os
 import glob
 import numpy as np
+
 from music21 import converter, instrument, note, chord, stream
+
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout, LSTM
 from tensorflow.keras.utils import to_categorical
 
+
 # -------------------------------------------------------------
-# 1. EXTRAÇÃO DE NOTAS DOS ARQUIVOS MIDI
+# 1. LEITURA E EXTRAÇÃO DOS ARQUIVOS MIDI
 # -------------------------------------------------------------
-def extrair_notas():
-    notes = []
-    arquivos = glob.glob("midis_publicos/*.mid")
-    
-    if not arquivos:
-        print("⚠️ Nenhum arquivo MIDI encontrado! Execute o 'python loader.py' primeiro.")
+
+def carregar_musicas():
+    lista_notas = []
+    caminhos_midi = glob.glob("midis_publicos/*.mid")
+
+    if len(caminhos_midi) == 0:
+        print("Nenhum arquivo MIDI foi encontrado. Execute o loader.py.")
         return []
 
-    for file in arquivos:
-        print(f"Lendo notas de: {file}")
+    for caminho in caminhos_midi:
+        print(f"Analisando arquivo: {caminho}")
+
         try:
-            midi = converter.parse(file)
+            musica = converter.parse(caminho)
+
             try:
-                s2 = instrument.partitionByInstrument(midi)
-                notes_to_parse = s2.parts[0].recurse() 
+                partes = instrument.partitionByInstrument(musica)
+                elementos = partes.parts[0].recurse()
             except:
-                notes_to_parse = midi.flat.notes
+                elementos = musica.flatten().notes
 
-            for element in notes_to_parse:
-                if isinstance(element, note.Note):
-                    notes.append(str(element.pitch))
-                elif isinstance(element, chord.Chord):
-                    notes.append('.'.join(str(n) for n in element.normalOrder))
-        except Exception as e:
-            print(f"Erro ao processar {file}: {e}")
+            for item in elementos:
+                if isinstance(item, note.Note):
+                    lista_notas.append(str(item.pitch))
 
-    return notes
+                elif isinstance(item, chord.Chord):
+                    notas_acorde = ".".join(
+                        str(n) for n in item.normalOrder
+                    )
+                    lista_notas.append(notas_acorde)
 
-notes = extrair_notas()
-print(f"\nTotal de notas extraídas: {len(notes)}")
+        except Exception as erro:
+            print(f"Não foi possível ler {caminho}: {erro}")
 
-if len(notes) == 0:
+    return lista_notas
+
+
+notas_musicais = carregar_musicas()
+
+print(f"\nQuantidade de elementos encontrados: {len(notas_musicais)}")
+
+if not notas_musicais:
     exit()
 
-# Mapeamento de notas para valores numéricos
-pitchnames = sorted(set(item for item in notes))
-n_vocab = len(pitchnames)
-note_to_int = dict((note, number) for number, note in enumerate(pitchnames))
-int_to_note = dict((number, note) for number, note in enumerate(pitchnames))
-
-# Criando sequências de contexto para o treino
-sequence_length = 32
-network_input = []
-network_output = []
-
-for i in range(0, len(notes) - sequence_length, 1):
-    sequence_in = notes[i:i + sequence_length]
-    sequence_out = notes[i + sequence_length]
-    network_input.append([note_to_int[char] for char in sequence_in])
-    network_output.append(note_to_int[sequence_out])
-
-n_patterns = len(network_input)
-X = np.reshape(network_input, (n_patterns, sequence_length, 1)) / float(n_vocab)
-y = to_categorical(network_output, num_classes=n_vocab)
 
 # -------------------------------------------------------------
-# 2. CONSTRUÇÃO E TREINAMENTO DO MODELO LSTM
+# 2. PREPARAÇÃO DOS DADOS PARA A REDE NEURAL
 # -------------------------------------------------------------
-print("\nConstruindo a Rede Neural...")
-model = Sequential([
-    LSTM(128, input_shape=(X.shape[1], X.shape[2]), return_sequences=True),
+
+vocabulario = sorted(set(notas_musicais))
+total_notas = len(vocabulario)
+
+nota_para_numero = {
+    valor: indice for indice, valor in enumerate(vocabulario)
+}
+
+numero_para_nota = {
+    indice: valor for indice, valor in enumerate(vocabulario)
+}
+
+tamanho_sequencia = 32
+
+entradas = []
+saidas = []
+
+for posicao in range(len(notas_musicais) - tamanho_sequencia):
+
+    trecho = notas_musicais[posicao:posicao + tamanho_sequencia]
+    proxima_nota = notas_musicais[posicao + tamanho_sequencia]
+
+    entradas.append([
+        nota_para_numero[valor] for valor in trecho
+    ])
+
+    saidas.append(nota_para_numero[proxima_nota])
+
+
+total_sequencias = len(entradas)
+
+X = np.reshape(
+    entradas,
+    (total_sequencias, tamanho_sequencia, 1)
+) / float(total_notas)
+
+y = to_categorical(saidas, num_classes=total_notas)
+
+
+# -------------------------------------------------------------
+# 3. CRIAÇÃO E TREINAMENTO DA REDE NEURAL
+# -------------------------------------------------------------
+
+print("\nPreparando o modelo de inteligência artificial...")
+
+modelo = Sequential([
+    LSTM(
+        128,
+        input_shape=(X.shape[1], X.shape[2]),
+        return_sequences=True
+    ),
+
     Dropout(0.2),
+
     LSTM(128),
-    Dense(n_vocab, activation='softmax')
+
+    Dense(total_notas, activation="softmax")
 ])
 
-model.compile(loss='categorical_crossentropy', optimizer='adam')
+modelo.compile(
+    loss="categorical_crossentropy",
+    optimizer="adam"
+)
 
-print("Iniciando o treinamento do modelo (Aguarde alguns instantes)...")
-model.fit(X, y, epochs=30, batch_size=32)
+print("Treinamento iniciado!")
 
-# -------------------------------------------------------------
-# 3. GERAÇÃO DE NOVAS MÚSICAS (AMOSTRAGEM POR TEMPERATURA)
-# -------------------------------------------------------------
-def sample_with_temperature(predictions, temperature=1.0):
-    predictions = np.asarray(predictions).astype('float64')
-    predictions = np.log(predictions + 1e-7) / temperature
-    exp_preds = np.exp(predictions)
-    predictions = exp_preds / np.sum(exp_preds)
-    probas = np.random.multinomial(1, predictions, 1)
-    return np.argmax(probas)
+modelo.fit(
+    X,
+    y,
+    epochs=30,
+    batch_size=32
+)
 
-start = np.random.randint(0, len(network_input) - 1)
-pattern = list(network_input[start])
-prediction_output = []
+print("\nTreinamento concluído!")
 
-TEMPERATURE = 1.0 # Altere entre 0.8 e 1.2 para ajustar a criatividade
-QTD_NOTAS = 100
-
-print(f"\nGerando {QTD_NOTAS} notas originais...")
-
-for note_index in range(QTD_NOTAS):
-    prediction_input = np.reshape(pattern, (1, len(pattern), 1)) / float(n_vocab)
-    prediction = model.predict(prediction_input, verbose=0)[0]
-    
-    index = sample_with_temperature(prediction, temperature=TEMPERATURE)
-    result = int_to_note[index]
-    prediction_output.append(result)
-    
-    pattern.append(index)
-    pattern = pattern[1:]
 
 # -------------------------------------------------------------
-# 4. EXPORTAÇÃO DO ARQUIVO MIDI
+# 4. GERAÇÃO DE UMA NOVA COMPOSIÇÃO
 # -------------------------------------------------------------
-offset = 0
-output_notes = []
 
-for pattern_str in prediction_output:
-    if ('.' in pattern_str) or pattern_str.isdigit():
-        notes_in_chord = pattern_str.split('.')
-        notes = [note.Note(int(c)) for c in notes_in_chord]
-        new_chord = chord.Chord(notes)
-        new_chord.offset = offset
-        output_notes.append(new_chord)
+def escolher_nota(probabilidades, temperatura=1.0):
+
+    probabilidades = np.asarray(probabilidades).astype("float64")
+
+    probabilidades = np.log(probabilidades + 1e-7) / temperatura
+
+    probabilidades = np.exp(probabilidades)
+
+    probabilidades = probabilidades / np.sum(probabilidades)
+
+    escolha = np.random.multinomial(1, probabilidades, 1)
+
+    return np.argmax(escolha)
+
+
+indice_inicio = np.random.randint(0, len(entradas))
+
+sequencia_atual = list(entradas[indice_inicio])
+
+musica_gerada = []
+
+TEMPERATURA = 1.0
+QUANTIDADE_NOTAS = 100
+
+print(f"\nCriando uma composição com {QUANTIDADE_NOTAS} notas...")
+
+for contador in range(QUANTIDADE_NOTAS):
+
+    dados_entrada = np.reshape(
+        sequencia_atual,
+        (1, len(sequencia_atual), 1)
+    ) / float(total_notas)
+
+    probabilidades = modelo.predict(
+        dados_entrada,
+        verbose=0
+    )[0]
+
+    nota_escolhida = escolher_nota(
+        probabilidades,
+        temperatura=TEMPERATURA
+    )
+
+    musica_gerada.append(numero_para_nota[nota_escolhida])
+
+    sequencia_atual.append(nota_escolhida)
+    sequencia_atual = sequencia_atual[1:]
+
+
+# -------------------------------------------------------------
+# 5. CONVERSÃO E SALVAMENTO DA MÚSICA
+# -------------------------------------------------------------
+
+tempo = 0
+elementos_musicais = []
+
+for elemento in musica_gerada:
+
+    if "." in elemento or elemento.isdigit():
+
+        valores_acorde = elemento.split(".")
+
+        notas_acorde = [
+            note.Note(int(valor))
+            for valor in valores_acorde
+        ]
+
+        acorde = chord.Chord(notas_acorde)
+        acorde.offset = tempo
+
+        elementos_musicais.append(acorde)
+
     else:
-        new_note = note.Note(pattern_str)
-        new_note.offset = offset
-        output_notes.append(new_note)
 
-    offset += 0.5
+        nova_nota = note.Note(elemento)
+        nova_nota.offset = tempo
 
-midi_stream = stream.Stream(output_notes)
-nome_saida = 'minha_musica_gerada.mid'
-midi_stream.write('midi', fp=nome_saida)
+        elementos_musicais.append(nova_nota)
 
-print(f"\n🎉 Sucesso! Sua música foi gerada e salva como '{nome_saida}' na pasta do projeto.")
+    tempo += 0.5
+
+
+composicao = stream.Stream(elementos_musicais)
+
+arquivo_final = "minha_musica_gerada.mid"
+
+composicao.write("midi", fp=arquivo_final)
+
+print("\nMúsica criada com sucesso!")
+print(f"Arquivo salvo: {os.path.abspath(arquivo_final)}")
